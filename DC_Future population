@@ -1,0 +1,352 @@
+library(tidyverse)
+library(lubridate)
+install.packages("demography")
+library(demography)
+library(forecast)
+install.packages("HMDHFDplus")
+library(HMDHFDplus)
+
+#how many steps ahead
+n.stepsahead <- 15
+
+
+# Get Mortality and convert it  ----------------------------------------------------------------
+
+importpop <- hmd.pop(country = "ITA", username = "yourusername" , password = "yourpassword", label = "ITA")
+
+
+pop_ITA_base <- readHMDweb(CNTRY = "ITA", item = "Population", uusername = "yourusername" , password = "yourpassword", fixup = TRUE)
+mort_ITA_base <- readHMDweb(CNTRY = "ITA", item = "Mx_1x1", username = "yourusername" , password = "yourpassword",, fixup = TRUE)
+
+# Concerting mortality rates into .demogdata format
+firstyearmort <- mort_ITA_base[[1,1]]
+lastyearmort <- mort_ITA_base[[nrow(mort_ITA_base), 1]]
+
+firstyearpop <- pop_ITA_base[[1,1]]
+lastyearpop <- pop_ITA_base[[nrow(pop_ITA_base), 1]]
+
+
+pop_ITA_female <- pop_ITA_base %>% 
+  select(-OpenInterval) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  select(Year, Age, Female1) %>% 
+  pivot_wider(values_from = Female1, names_from = Year) %>% 
+  select(-Age)
+
+
+mort_ITA_female  <- mort_ITA_base %>% 
+  select(-OpenInterval) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  select(Year, Age, Female) %>% 
+  pivot_wider(values_from = Female, names_from = Year) %>% 
+  select(-Age)
+
+
+female_ITA_demogdata <- demogdata(mort_ITA_female, pop_ITA_female, years = firstyearmort:lastyearmort, ages = 0:100, 
+                                  type = "mortality", label = "ITA", name = "female" )
+
+
+
+
+pop_ITA_male <- pop_ITA_base %>% 
+  select(Year, Age, Male1) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  pivot_wider(values_from = Male1, names_from = Year) %>% 
+  select(-Age)
+
+
+mort_ITA_male  <- mort_ITA_base %>% 
+  select(Year, Age, Male) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  pivot_wider(values_from = Male, names_from = Year) %>% 
+  select(-Age)
+
+
+male_ITA_demogdata <- demogdata(mort_ITA_male, pop_ITA_male, years = firstyearmort:lastyearmort, ages = 0:100, 
+                                type = "mortality", label = "ITA", name = "male" )
+
+
+
+pop_ITA_total <- pop_ITA_base %>% 
+  select(Year, Age, Total1) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  pivot_wider(values_from = Total1, names_from = Year) %>% 
+  select(-Age)
+
+
+mort_ITA_total  <- mort_ITA_base %>% 
+  select(Year, Age, Total) %>% 
+  filter(Age >= 0, Age <= 100) %>% 
+  pivot_wider(values_from = Total, names_from = Year) %>% 
+  select(-Age)
+
+
+
+
+mort_ITA_demogdata <- demogdata(mort_ITA_total, pop_ITA_total, years = firstyearmort:lastyearmort, ages = 0:100,
+                                label = "ITA", type = "mortality", name = "total")
+
+
+mort_ITA_demogdata[["rate"]][["male"]] <- male_ITA_demogdata[["rate"]][["male"]]
+mort_ITA_demogdata[["pop"]][["male"]] <- male_ITA_demogdata[["pop"]][["male"]]
+
+
+mort_ITA_demogdata[["rate"]][["female"]] <- female_ITA_demogdata[["rate"]][["female"]]
+mort_ITA_demogdata[["pop"]][["female"]] <- female_ITA_demogdata[["pop"]][["female"]]
+
+mort_ITA_demogdata
+
+
+# Get fertilty
+exposure_ITA_base <- readHFDweb(CNTRY = "ITA", item = "exposRR", username = "yourusername" , password = "yourpassword", fixup = TRUE)
+fertility_ITA_base <- readHFDweb(CNTRY = "ITA", item = "asfrRR", username = "yourusername" , password = "yourpassword", fixup = TRUE )
+
+#Converting fertility rates into .demogdata format 
+
+firstyearfert <- exposure_ITA_base[[1,1]]
+lastyearfert <- exposure_ITA_base[[nrow(exposure_ITA_base),1]]
+
+firstagefert <- 15
+lastagefert <- 50
+
+
+exposure_ITA_format <- exposure_ITA_base %>% 
+  select(-OpenInterval) %>% 
+  pivot_wider(values_from = Exposure, names_from = Year) %>% 
+  filter(Age >= firstagefert, Age < lastagefert) %>% 
+  select(-Age)
+
+
+fertility_ITA_format <- fertility_ITA_base %>% 
+  select(-OpenInterval) %>% 
+  mutate(ASFR = ASFR * 1000) %>% 
+  pivot_wider(values_from = ASFR, names_from = Year) %>% 
+  filter(Age >= firstagefert, Age < lastagefert) %>% 
+  select(-Age)
+
+
+fert_ITA <- demogdata(fertility_ITA_format, exposure_ITA_format, years = firstyearfert:lastyearfert, ages = 15:49, label = "ITA", type = "fertility", name = "female")
+
+
+migr_ITA <- netmigration(mort_ITA_demogdata, fert_ITA, mfratio = 1.05)
+#smoothing data
+
+mort_sm_ITA <- smooth.demogdata(mort_ITA_demogdata, obs.var = "theoretical")
+fert_sm_ITA <- smooth.demogdata(fert_ITA, obs.var = "theoretical")
+migr_ITA_sm <- smooth.demogdata(migr_ITA)
+
+
+mort_fit_ITA <- coherentfdm(mort_sm_ITA)
+
+fert_fit_ITA <- fdm(fert_sm_ITA)
+
+mig_fit_ITA <- coherentfdm(migr_ITA_sm)
+
+# MMortality
+mortf_ITA <- forecast(mort_fit_ITA, h=n.stepsahead, max.d=1)
+
+# Fertility
+fertf_ITA <- forecast(fert_fit_ITA, h=n.stepsahead,max.d=1)
+
+
+# Migration
+migf_ITA <- forecast(mig_fit_ITA, h=n.stepsahead, stationary=TRUE)
+
+
+#popsimulating
+popstarter <- extract.ages(importpop, 0:100)
+
+
+simulatedpop_ITA <- pop.sim(mortf_ITA, fertf_ITA, migf_ITA, firstyearpop=popstarter, N=2500)
+
+pop_mean_male_ITA_raw <- apply(simulatedpop_ITA$male, c(1,2), mean)
+pop_mean_female_ITA_raw <- apply(simulatedpop_ITA$female, c(1,2), mean)
+pop_mean_tot_ITA_raw <- pop_mean_male_ITA_raw + pop_mean_female_ITA_raw
+
+pop_p05_male_ITA_raw <-  apply(simulatedpop_ITA$male, c(1,2), quantile, p=0.05)
+pop_p05_female_ITA_raw <-   apply(simulatedpop_ITA$female, c(1,2), quantile, p=.05)
+
+pop_p05_tot_ITA_raw <- pop_p05_male_ITA_raw + pop_p05_female_ITA_raw
+
+
+colnames(pop_mean_tot_ITA_raw)
+
+###  ! 
+# The forecasted years (column names of pop_mean_tot_ITA_raw) must be inserted manually in the pivot_longer ! 
+
+pop_FUT_ITA_manipulated <- as_tibble(pop_mean_tot_ITA_raw) %>% 
+  mutate(agetot = 0:100) %>% 
+  pivot_longer(`2018`:`2032`, names_to = "year", values_to = "pop_year") %>% 
+  group_by(year) %>% 
+  arrange(year, agetot)
+
+labs <- c(0, "1_4", paste(seq(5, 90, by = 5), seq(5 + 5 - 1, 95 - 1, by = 5),
+                          sep = "_"), paste(95, "N", sep = ""))
+
+pop_FUT_ITA_manipulated$AgeGroup <- cut(pop_FUT_ITA_manipulated$agetot, breaks = c(0,1, seq(5, 95, by = 5), Inf), labels = labs, right = FALSE)
+
+pop_FUT_ITA_manipulated <- pop_FUT_ITA_manipulated %>% 
+  group_by(year, AgeGroup) %>% 
+  summarise(cohortsize = sum(pop_year)) %>% 
+  ungroup()
+
+View(pop_FUT_ITA_manipulated)
+
+just_as_check <- pop_FUT_ITA_manipulated %>% 
+  group_by(year) %>% 
+  summarise(popannua = sum(cohortsize))
+
+View(just_as_check) # You should check the forecasted populations against the currently available ones, such as the ones at https://www.populationpyramid.net/
+View(pop_FUT_ITA_manipulated)
+
+# low and up --------------------------------------------------------------
+#q0.05
+
+pop_p05_male_ITA_raw <-  apply(simulatedpop_ITA$male, c(1,2), quantile, p=0.05)
+pop_p05_female_ITA_raw <-   apply(simulatedpop_ITA$female, c(1,2), quantile, p=.05)
+
+pop_p05_tot_ITA_raw <- pop_p05_male_ITA_raw + pop_p05_female_ITA_raw
+
+
+pop_FUT_p05_ITA_manipulated <- as_tibble(pop_p05_tot_ITA_raw) %>% 
+  mutate(agetot = 0:100) %>% 
+  pivot_longer(`2018`:`2032`, names_to = "year", values_to = "pop_year") %>% 
+  group_by(year) %>% 
+  arrange(year, agetot)
+
+labs <- c(0, "1_4", paste(seq(5, 90, by = 5), seq(5 + 5 - 1, 95 - 1, by = 5),
+                          sep = "_"), paste(95, "N", sep = ""))
+
+pop_FUT_p05_ITA_manipulated$AgeGroup <- cut(pop_FUT_p05_ITA_manipulated$agetot, breaks = c(0,1, seq(5, 95, by = 5), Inf), labels = labs, right = FALSE)
+
+pop_FUT_p05_ITA_manipulated <- pop_FUT_p05_ITA_manipulated %>% 
+  group_by(year, AgeGroup) %>% 
+  summarise(cohortsize = sum(pop_year)) %>% 
+  ungroup() %>% 
+  rename(cohortsize_p05 = cohortsize)
+
+pop_FUT_SD_ITA <- inner_join(pop_FUT_ITA_manipulated, pop_FUT_p05_ITA_manipulated)
+pop_FUT_SD_ITA <- pop_FUT_SD_ITA %>% 
+  mutate(sigma = abs((cohortsize - cohortsize_p05)/qnorm(0.05)))
+  
+fut_POP_SD_ITA <- pop_FUT_SD_ITA
+saveRDS(fut_POP_SD_ITA, "futpop_SD_by5_ITA_export.rds")
+
+View(pop_FUT_p05_ITA_manipulated)
+
+#low
+pop_FUT_p16_ITA_manipulated <- as_tibble(pop_p16_tot_ITA_raw) %>% 
+  mutate(agetot = 0:100) %>% 
+  pivot_longer(`2018`:`2032`, names_to = "year", values_to = "pop_year") %>% 
+  group_by(year) %>% 
+  arrange(year, agetot)
+
+
+labs <- c(0, "1_4", paste(seq(5, 90, by = 5), seq(5 + 5 - 1, 95 - 1, by = 5),
+                          sep = "_"), paste(95, "N", sep = ""))
+
+pop_FUT_p16_ITA_manipulated$AgeGroup <- cut(pop_FUT_p16_ITA_manipulated$agetot, breaks = c(0,1, seq(5, 95, by = 5), Inf), labels = labs, right = FALSE)
+
+pop_FUT_p16_ITA_manipulated <- pop_FUT_p16_ITA_manipulated %>% 
+  group_by(year, AgeGroup) %>% 
+  summarise(cohortsize = sum(pop_year)) %>% 
+  ungroup()
+
+View(pop_FUT_p_16_ITA_manipulated)
+
+#low
+
+
+# fut mortality rates -----------------------------------------------------
+
+base_mort5xrates_ITA <-  readHMDweb(CNTRY = "ITA", item = "Mx_5x1", username = "yourusername" , password = "yourpassword", fixup = TRUE)
+base_pop5xrates_ITA <- readHMDweb(CNTRY = "ITA", item = "Population5", username = "yourusername" , password = "yourpassword", fixup = TRUE)
+
+first5yearmort <- base_mort5xrates_ITA[[1,1]]
+last5yearmort <- base_mort5xrates_ITA[[nrow(base_mort5xrates_ITA),1 ]]
+
+ageseq5 <- unique(base_mort5xrates_ITA$Age)
+
+mort5xrates_ITA <- base_mort5xrates_ITA %>%
+  select(Year, Age, Total) %>% 
+  pivot_wider(values_from = Total, names_from = Year) %>% 
+  select(-Age)
+
+
+pop5xrates_ITA <- base_pop5xrates_ITA %>% 
+  select(Year, Age, Total1) %>% 
+  pivot_wider(values_from = Total1, names_from = Year) %>% 
+  select(-Age)
+
+
+mort5_demogdata <- demogdata(mort5xrates_ITA, pop5xrates_ITA, years = first5yearmort:last5yearmort, ages = ageseq5,
+                             type = "mortality", name = "total", label = "ITAden")  
+
+
+mort5_smooth <- smooth.demogdata(mort5_demogdata, obs.var = "theoretical")
+mort5_fit <- fdm(mort5_smooth)
+mort5_forecast <- forecast(mort5_fit, h = 15)
+
+future_mortality_rates_ITA <- as_tibble(mort5_forecast[["rate"]][["total"]])
+View(future_mortality_rates_ITA)
+
+future_mrates_ITA <- future_mortality_rates_ITA %>% 
+  mutate(Age = 0:(nrow(future_mortality_rates_ITA)-1)) %>% 
+  pivot_longer(`2018`:`2032`, values_to = "mortalityrates") %>% 
+  filter(Age <= 100)
+
+
+future_pop_ITA <- pop_FUT_ITA_manipulated
+
+labs <- c(0, "1_4", paste(seq(5, 90, by = 5), seq(5 + 5 - 1, 95 - 1, by = 5),
+                          sep = "_"), paste(95, "N", sep = ""))
+
+future_mrates_ITA_manipulated <- future_mrates_ITA 
+future_mrates_ITA_manipulated$AgeGroup <- cut(future_mrates_ITA_manipulated$Age, breaks = c(0,1, seq(5, 95, by = 5), Inf), labels = labs, right = FALSE)
+
+View(future_mrates_ITA_manipulated)
+
+future_mrates_ITA_manipulated <- future_mrates_ITA_manipulated %>% 
+  rename(year = name) %>% 
+  group_by(year, Age)
+
+future_pop_ITA_manipulated <- pop_FUT_ITA_manipulated
+
+
+View(future_mrates_ITA_manipulated) 
+View(future_pop_ITA_manipulated)  
+
+
+View(pop_mean_tot_ITA_raw)
+future_pop_for_mrates <- as_tibble(pop_mean_tot_ITA_raw) %>% 
+  mutate(agetot = 0:100) %>% 
+  pivot_longer(`2018`:`2032`, names_to = "year", values_to = "pop_year") %>% 
+  group_by(year) %>% 
+  rename(Age = agetot) %>% 
+  arrange(year, Age)
+
+future_pop_for_mrates$AgeGroup <- cut(future_pop_for_mrates$Age, breaks = c(0,1, seq(5, 95, by = 5), Inf), labels = labs, right = FALSE)
+
+future_pop_for_mrates <- future_pop_for_mrates 
+
+View(future_mrates_ITA_manipulated)
+
+joined_for_mortality <- inner_join(future_pop_for_mrates, future_mrates_ITA_manipulated)
+
+futmortby5 <- joined_for_mortality %>%
+  group_by(year, AgeGroup) %>% 
+  arrange(year, AgeGroup, Age) %>% 
+  summarise(mxfut = weighted.mean(mortalityrates, pop_year))
+
+futmortby5_ITA_export <- futmortby5 %>% 
+  mutate(countryocde = "ITA")
+
+
+futpopby5_ITA_export <- pop_FUT_ITA_manipulated
+
+saveRDS(futmortby5_ITA_export, "futmortby5_ITA_export.rds") # Future mortality rates
+saveRDS(futpopby5_ITA_export, "futpopby5_ITA_export.rds") # Future populations
+saveRDS(fut_POP_SD_ITA, "futpop_SD_by5_ITA_export.rds") # Future population AND the standard deviation of each cohort
+
+
+
