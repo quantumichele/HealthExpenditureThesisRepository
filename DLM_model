@@ -1,0 +1,384 @@
+library(tidyverse)
+library(dlm)
+
+
+rgdpgrowth <- readRDS("rgdpgrowth.rds")
+yplus <- readRDS("y and rgdpgrowth.rds")
+yplus_10res <- readRDS("yplus_10res.rds")
+
+
+mortality_data_ITA <- read_table2("C:/Users/Michele/Desktop/HMD DATA/Mx_5x1/ITA.Mx_5x1.txt", 
+                                  col_types = cols(Female = col_number(), 
+                                                   Male = col_number(), Total = col_number()))
+mortality_ITA  <- mortality_data_ITA %>% 
+  select(1,2,5) %>% 
+  rename(mu_year = Total, year = Year) %>% 
+  mutate(mu_lag1 = lag(mu_year, n = 24L)) %>%
+  filter(year > 1960) %>% 
+  filter(Age != "100-104", Age !="105-109", Age != "110+" ) %>% 
+  mutate(Age = ifelse(Age == "95-99", "95N", Age))
+
+csizes_ITA <- allpops_oecd_long %>% 
+  filter(countrycode == "ITA") %>% 
+  select(countrycode, year, Age, pcsize)
+
+ITA_pop_mort <- inner_join(csizes_ITA, mortality_ITA, by = c("year"="year", "Age" = "Age"))
+ITA_pop_mort_gdp <- inner_join(ITA_pop_mort, yplus_10res, by = c("year"="year", "countrycode"="countrycode"))
+rm(ITA_pop_mort)
+
+
+
+
+
+ITA_FG <- ITA_pop_mort_gdp %>% 
+  mutate(drc_k10 = (1 + 9 * mu_year ) / (1 + 9 * mu_lag1)) %>% 
+  select(-c(mu_year, mu_lag1)) %>% 
+  mutate(z = (1 + 0.8*rgdpgrowth + last3avg) * drc_k10) %>% 
+  select(-c(rgdpgrowth, drc_k10, gdp_nom_mlnusd, deflatorvalue, rgdp)) %>% 
+  select(-c(dif1,dif2,dif3,dif4,dif5,dif6,dif7,dif8,dif9,dif10)) %>% 
+  filter(year > 1980) %>% 
+  pivot_wider(names_from = Age, values_from = c(pcsize, z)) %>% 
+  select(-(3:10))
+
+ITA_y <- yplus %>%
+  select(countrycode, year, he_nom_mlnusd, gdp_nom_mlnusd, he_on_gdp_perc) %>% 
+  filter(year > 1970, countrycode == "ITA") %>% 
+  arrange(year)
+
+
+# prior info
+
+priorinfo03  <- read_delim("priorinfo03.csv", ";", escape_double = FALSE, col_types = cols(pcsize = col_number(), 
+                                                                                           `THETA 2003` = col_number()), trim_ws = TRUE)
+base03 <- as.vector(t(priorinfo03$`THETA 2003`)) #problem: theta is for 2003 
+ratiobase <- base03 / base03[length(base03)]
+X03 <- ITA_FG %>% 
+  filter(year >= 1992) 
+
+y03_allobs_tibble <- ITA_y %>% 
+  filter(year >= 1992) 
+
+y03_allobs <- as.matrix(y03_allobs_tibble$he_nom_mlnusd) * 10 ^ 6
+Xmod <- X03[,3:44]
+length(y03_allobs) <- nrow(X03)
+
+qwerty <-  as.matrix(Xmod[1, 1:21]) * Xmod[1, 22:42]
+converter_for_theta0_full <- (as.matrix(qwerty) %*% base03 ) / (y03_allobs_tibble$he_nom_mlnusd[[1]] * 10^6)
+converter_for_theta0_round2 <- round(converter_for_theta0_full, 2) 
+
+
+ratiobase <- base03 / base03[length(base03)]
+
+                                                                                           `THETA 2003` = col_number()), trim_ws = TRUE)
+base03 <- as.vector(t(priorinfo03$`THETA 2003`))
+ratiobase <- base03 / base03[length(base03)]
+X03 <- ITA_FG %>% 
+  filter(year >= 1992) 
+
+y03_allobs_tibble <- ITA_y %>% 
+  filter(year >= 1992) 
+
+y03_allobs <- as.matrix(y03_allobs_tibble$he_nom_mlnusd) * 10 ^ 6
+Xmod <- X03[,3:44]
+length(y03_allobs) <- nrow(X03)
+
+qwerty <-  as.matrix(Xmod[1, 1:21]) * Xmod[1, 22:42]
+converter_for_theta0_full <- (as.matrix(qwerty) %*% base03 ) / (y03_allobs_tibble$he_nom_mlnusd[[1]] * 10^6)
+converter_for_theta0_round2 <- round(converter_for_theta0_full, 2) 
+
+
+ratiobase <- base03 / base03[length(base03)]
+
+
+
+# VARIANCE SELECTION  -----------------------------------------------------
+
+
+Vmod <- 10^18
+Wsigma <- 2*10^5
+Csigma <- 5 * 10^4
+
+
+# alt W diag --------------------------------------------------------------
+  
+alt_Wdiag <- dlm(FF = matrix(1:21, nrow=1), JFF = matrix(1:21, nrow = 1), V = Vmod,
+                 GG = diag(21), JGG = diag(22:42), W = diag(ratiobase)* Wsigma,
+                 m0 = as.vector(base03) / as.vector(converter_for_theta0_round2) , C0 = diag(ratiobase)*Csigma , X = Xmod)
+
+alt_Wdiag_filt <- dlmFilter(y03_allobs, alt_Wdiag)
+
+
+plot(alt_Wdiag_filt$y, main = "ITA, retroactive only", pch = 18) + lines(alt_Wdiag_filt$f, col = randomColor(1), type = "o", lty = "dotted")
+
+Theil_retro_data <- as_tibble(cbind(alt_Wdiag_filt$y,alt_Wdiag_filt$f)) 
+colnames(Theil_retro_data) <-  c("actual_values", "my_1step_ahead_forecasts_retro")
+riassunto_retro_ITA <- Theil_retro_data %>% 
+  summarise(TheilU = sqrt(sum((actual_values- my_1step_ahead_forecasts_retro)^2)/ sum(diff(actual_values)^2)))
+riassunto_retro_ITA
+
+alt_Wdiag_res <-  residuals(alt_Wdiag_filt)$sd
+# alt_upper_90 <- alt_Wdiag_filt$f + qnorm(0.95) * alt_Wdiag_res
+# alt_lower_90 <- alt_Wdiag_filt$f - qnorm(0.95) * alt_Wdiag_res
+
+alt_upper_80 <- alt_Wdiag_filt$f + qnorm(0.975) * alt_Wdiag_res
+alt_lower_80 <- alt_Wdiag_filt$f - qnorm(0.975) * alt_Wdiag_res
+
+# GRAPH ME ----------------------------------------------------------------
+
+
+plot(alt_Wdiag_filt$y, main = "ITA, retroactive only", pch = 18) + lines(alt_Wdiag_filt$f, col = "blue", type = "o", lty = "dotted") +
+  lines(alt_upper_80, col = "darkblue", lty = "dotted") + lines(alt_lower_80, col = "darkblue", lty = "dotted") 
+
+attach(alt_Wdiag_filt)
+z_sR <- dlmSvd2var(U.R, D.R)
+z_sC <- dropFirst(dlmSvd2var(U.C, D.C))
+detach()
+
+# GRAPH  ----------------------------------------------------------------
+
+leg_big <- c("Observed", "Forecast", "90 % C.I.")
+
+plot(alt_Wdiag_filt$y, main = "Italy", pch = 18, xlab = "year", ylab = "expenditure ($)") 
+points(alt_Wdiag_filt$f, type = "o",   lty = "dotted", pch = 1) +
+  lines(alt_upper_80, col = "blue", lty = "dotted") + lines(alt_lower_80, col = "blue", lty = "dotted") + 
+  legend("bottomright", legend = leg_big, lty = c(NA, "dotted", "longdash"), col = c("black", "black", "blue"), pch = c(18, 1, NA), bty = "n", cex = .8) 
+
+
+futpop_ITA <- readRDS("futpopby5_ITA_export.rds")
+futmort_ITA <- readRDS("/futmortby5_ITA_export.rds")
+fut_SD_ITA <- readRDS("futpop_SD_by5_ITA_export.rds") 
+rgdpfutITA <- read_delim("rgdpfutITA.csv", 
+                         ";", escape_double = FALSE, trim_ws = TRUE)
+
+futpop_ITA_long <- futpop_ITA %>% 
+  mutate(AgeGroup = str_replace(AgeGroup, "_", "-")) %>% 
+  rename(Age = AgeGroup, pcsize = cohortsize) %>% 
+  mutate(year = as.numeric(year))
+
+futmort_ITA_long <- futmort_ITA %>% 
+  mutate(AgeGroup = str_replace(AgeGroup, "_", "-")) %>% 
+  rename(Age = AgeGroup, mu_year = mxfut) %>% 
+  ungroup() %>% 
+  mutate(year = as.numeric(year))
+
+futpopmort_ITA <- inner_join(futpop_ITA_long, futmort_ITA_long)
+
+
+futpopmortrgdp_ITA <- inner_join(futpopmort_ITA, rgdpfutITA)
+futpopmortrgdp_ITA <- futpopmortrgdp_ITA %>% 
+  mutate(rgdpgrowth = rgdpgrowth/100)
+
+prova1 <- bind_rows(ITA_pop_mort_gdp, futpopmortrgdp_ITA)
+
+ITAfut_FG <- prova1 %>% 
+  ungroup() %>% 
+  mutate(mu_lag1 = lag(mu_year, 21L)) %>% 
+  mutate(last3avg = ifelse(year >= 2018, 0.02, last3avg)) %>% 
+  mutate(drc_k10 = (1 + 9 * mu_year ) / (1 + 9 * mu_lag1)) %>% 
+  select(-c(mu_year, mu_lag1)) %>% 
+  mutate(z = (1 + 0.8*rgdpgrowth + last3avg ) * drc_k10) %>% 
+  select(-c(rgdpgrowth, drc_k10, gdp_nom_mlnusd, deflatorvalue, rgdp, countryocde)) %>% 
+  select(-c(dif1,dif2,dif3,dif4,dif5,dif6,dif7,dif8,dif9,dif10, last10avg)) %>% 
+  pivot_wider(names_from = Age, values_from = c(pcsize, z)) %>% 
+  select(-(3:9))
+
+
+# DLM LONGER + Building Confidence Intervals  ---------------------------------------------------
+ratiobase <- base03 / base03[length(base03)]
+
+Xfut <- filter(ITAfut_FG, year >= 1992)
+
+base_ylonger <- y03_allobs_tibble[,2:5]
+Xlonger <- Xfut[,3:44]
+ylonger <- base_ylonger$he_nom_mlnusd * 10 ^ 6
+ylonger[29:34] <- NA
+
+
+dlmlonger_altdiag <- dlm(FF = matrix(1:21, nrow=1), JFF = matrix(1:21, nrow = 1), V = Vmod,
+                         GG = diag(21), JGG = diag(22:42), W = diag(ratiobase)* Wsigma,
+                         m0 = as.vector(base03) / as.vector(converter_for_theta0_round2) , C0 = diag(ratiobase)*Csigma, X = Xlonger)
+
+dlmlonger_altdiag_filter <- dlmFilter(ylonger, dlmlonger_altdiag)
+
+plot(dlmlonger_altdiag_filter$f, type = "o", col = "royalblue1", main = "retroactive + future", lty = "dotted") + 
+  points(dlmlonger_altdiag_filter$y, col = "black", pch = 20) + abline( v = 28, col = "lightgrey", lty = "longdash")
+
+
+residui <- residuals(dlmlonger_altdiag_filter)$sd
+
+f_upper <- dlmlonger_altdiag_filter$f + qnorm(0.95) * residui
+f_lower <- dlmlonger_altdiag_filter$f - qnorm(0.95) * residui
+
+plot(dlmlonger_altdiag_filter$f, main = "ITA, last obs 2019", type = "o", lty = "dotted") + lines(f_lower, col = "royalblue1", lty ="dashed") + 
+  lines(f_upper, col = "royalblue1") +   abline(v = 28, lty = "dashed") + points(dlmlonger_altdiag_filter$y,  pch = 18)
+
+distanza <- f_upper - f_lower
+distanza / 10^9
+
+
+
+attach(dlmlonger_altdiag_filter)
+z_sC <- dlmSvd2var(U.C, D.C)
+z_sR <- dlmSvd2var(U.R, D.R)
+detach()
+
+
+
+fut_SD_ITA_normalsums <- fut_SD_ITA %>% 
+  group_by(year) %>% 
+  summarise(meanyear = sum(cohortsize), sigmasq = sum(sigma^2))
+
+
+F_mean_2020 <- fut_SD_ITA %>% 
+  filter(year == 2020) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2020 <- fut_SD_ITA %>% 
+  filter(year == 2020) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2020 <- z_sR[[29]]
+
+
+
+Q_2020_brute <- t(F_mean_2020) %*% as.matrix(R_2020) %*% as.matrix(F_mean_2020) + dlmlonger_altdiag$V
+
+F_mean_2021 <- fut_SD_ITA %>% 
+  filter(year == 2021) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2021 <- fut_SD_ITA %>% 
+  filter(year == 2021) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2021 <- z_sR[[30]]
+Q_2021_brute <- t(F_mean_2021) %*% as.matrix(R_2021) %*% as.matrix(F_mean_2021) + dlmlonger_altdiag$V
+
+#2022
+F_mean_2022 <- fut_SD_ITA %>% 
+  filter(year == 2022) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2022 <- fut_SD_ITA %>% 
+  filter(year == 2022) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2022 <- z_sR[[31]]
+Q_2022_brute <- t(F_mean_2022) %*% as.matrix(R_2022) %*% as.matrix(F_mean_2022) + dlmlonger_altdiag$V
+
+
+#2023
+F_mean_2023 <- fut_SD_ITA %>% 
+  filter(year == 2023) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2023 <- fut_SD_ITA %>% 
+  filter(year == 2023) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2023 <- z_sR[[32]]
+Q_2023_brute <- t(F_mean_2023) %*% as.matrix(R_2023) %*% as.matrix(F_mean_2023) + dlmlonger_altdiag$V
+
+#2024
+F_mean_2024 <- fut_SD_ITA %>% 
+  filter(year == 2024) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2024 <- fut_SD_ITA %>% 
+  filter(year == 2024) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2024 <- z_sR[[33]]
+Q_2024_brute <- t(F_mean_2024) %*% as.matrix(R_2024) %*% as.matrix(F_mean_2024) + dlmlonger_altdiag$V
+
+#2025
+F_mean_2025 <- fut_SD_ITA %>% 
+  filter(year == 2025) %>% 
+  arrange(AgeGroup) %>% 
+  select(cohortsize)
+
+F_sigma_2025 <- fut_SD_ITA %>% 
+  filter(year == 2025) %>% 
+  arrange(AgeGroup) %>% 
+  select(sigma)
+
+R_2025 <- z_sR[[34]]
+Q_2025_brute <- t(F_mean_2025) %*% as.matrix(R_2025) %*% as.matrix(F_mean_2025) + dlmlonger_altdiag$V
+
+
+
+# new Q_t (accounting for variance of pop forecasts) ----------------------
+
+newres <- residui
+
+new_upper <-  dlmlonger_altdiag_filter$f + qnorm(0.95) * newres
+new_lower <- dlmlonger_altdiag_filter$f - qnorm(0.95) * newres
+
+new_distanza <- new_upper - new_lower
+new_distanza / 10^9
+
+
+# plot(dlmlonger_altdiag_filter$f, main = "ITA, last obs 2019") + points(new_lower, col = "blue", type = "o") + points(new_upper, col = "blue", type = "o") +
+#   abline(v = 28, lty = "dashed") + points(dlmlonger_altdiag_filter$y, col = "darkgreen", pch = 2)
+
+
+# "The usual" variance decomposition --------------------------------------
+# v(y_t+1 | F_t+1 = V[ E(y|F)] + E[ V(y|F)])
+a29 <- dlmlonger_altdiag_filter$a[29,]
+a30 <- dlmlonger_altdiag_filter$a[30,]
+a31 <- dlmlonger_altdiag_filter$a[31,]
+a32 <- dlmlonger_altdiag_filter$a[32,]
+a33 <- dlmlonger_altdiag_filter$a[33,]
+a34 <- dlmlonger_altdiag_filter$a[34,]
+
+# View(dlmlonger_altdiag_filter)
+
+
+f_sigma_2020 <- as.matrix(F_sigma_2020, ncol = 1)
+f_sigma_2021 <- as.matrix(F_sigma_2021, ncol = 1)
+f_sigma_2022 <- as.matrix(F_sigma_2022, ncol = 1)
+f_sigma_2023 <- as.matrix(F_sigma_2023, ncol = 1)
+f_sigma_2024 <- as.matrix(F_sigma_2024, ncol = 1)
+f_sigma_2025 <- as.matrix(F_sigma_2025, ncol = 1)
+
+true_Q_29 <- t(a29)^2 %*% f_sigma_2020^2 + Q_2020_brute
+true_Q_30 <- t(a30)^2 %*% f_sigma_2021^2 + Q_2021_brute
+true_Q_31 <- t(a31)^2 %*% f_sigma_2022^2 + Q_2022_brute
+true_Q_32 <- t(a32)^2 %*% f_sigma_2023^2 + Q_2023_brute
+true_Q_33 <- t(a33)^2 %*% f_sigma_2024^2 + Q_2024_brute
+true_Q_34 <- t(a34)^2 %*% f_sigma_2025^2 + Q_2025_brute
+
+
+finalres <- residuals(dlmlonger_altdiag_filter)$sd
+finalres[29] <- sqrt(true_Q_29)
+finalres[30] <- sqrt(true_Q_30)
+finalres[31] <- sqrt(true_Q_31)
+finalres[32] <- sqrt(true_Q_32)
+finalres[33] <- sqrt(true_Q_33)
+finalres[34] <- sqrt(true_Q_34)
+
+final_upper <- dlmlonger_altdiag_filter$f + qnorm(0.95) * finalres
+final_lower <- dlmlonger_altdiag_filter$f - qnorm(0.95) * finalres
+final_dist <- final_upper - final_lower
+final_dist / 10^9
+
+plot(dlmlonger_altdiag_filter$f, main = "ITA, last obs 2019, forecasts until 2025", xlab = "to be changed into years", ylab = "expenditure", type = "o", lty = "dotted") +
+  lines(final_upper, col = "blue") + lines(final_lower, col = "blue") +
+  abline(v = 28, lty = "dashed") + points(dlmlonger_altdiag_filter$y, pch = 18)
+
+
+
+
+
+
+
